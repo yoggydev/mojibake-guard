@@ -1,0 +1,10 @@
+# Keep the repository deterministic. Without this, git hands Windows users
+# CRLF copies of the scripts, and a project whose whole subject is bytes
+# surviving a round trip should not ship files whose bytes depend on the OS
+# that cloned them.
+* text=auto eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.csv  text eol=lf
