@@ -1,0 +1,17 @@
+# --- guard rail -------------------------------------------------------------
+# The exhaustive PowerShell measurement rig and its raw tables live in a
+# different repository and must never be committed here. Keeping the pattern
+# in this file means an accidental copy is refused by git, not by memory.
+ps1-*/
+*51775*
+*exhaustive*
+COMMITMENT-private*
+raw/
+# ----------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+
+# The sweep's raw rows: 50 MB, and the private half of the CP932 result.
+# summary.json is the publishable part and is committed.
+results/cp932/ascii-lost.csv
