@@ -79,6 +79,52 @@ COMPOSE_WORDS = {
     "zh": ["编码", "错误", "文件", "测试", "数据"],
 }
 
+# The reports describe long sessions and say the substitution happens
+# "inconsistently within the same response". A 3-sentence paragraph gives the
+# failure very few chances to appear. This list is the same idea as
+# COMPOSE_WORDS but long enough to force a document, so a rate measured with it
+# is comparable to what people actually hit.
+LONG_WORDS = {
+    "de": ["Verzögerung", "Straße", "für", "können", "Größe", "Änderung",
+           "Prüfung", "Ausführung", "Schlüssel", "Übersicht", "Qualität",
+           "Rückgabe", "Behörde", "Gebäude", "Vergütung", "Erhöhung",
+           "Wörterbuch", "Bestätigung", "Zurücksetzen", "Überprüfung"],
+    "tr": ["gecikme", "yağmur", "İstanbul", "şehir", "çalışıyor", "değişiklik",
+           "güvenlik", "başlangıç", "öğrenci", "sınıf", "açıklama", "günlük",
+           "yönetim", "işlem", "sürüm", "çözüm", "bağlantı", "geliştirme",
+           "kullanıcı", "doğrulama"],
+    "fr": ["requête", "élève", "déjà", "problème", "être", "réponse",
+           "détaillé", "événement", "opération", "précédent", "référence",
+           "génération", "création", "réussite", "sécurité", "propriété",
+           "vérité", "unité", "qualité", "entité"],
+    "cs": ["zpoždění", "kůň", "ďábelské", "příliš", "žluťoučký", "úpěl",
+           "možnost", "přístup", "změna", "výsledek", "chyba", "nastavení",
+           "uživatel", "položka", "hodnota", "soubor", "řetězec", "úroveň",
+           "šablona", "návrat"],
+    "ja": ["文字化け", "設定", "壊れる", "確認", "実行", "検証", "変換",
+           "取得", "削除", "更新", "処理", "出力", "入力", "境界", "符号",
+           "計測", "再現", "誤検出", "実測", "台帳"],
+    "es": ["configuración", "años", "señal", "está", "número", "versión",
+           "aplicación", "también", "según", "última", "código", "diseño",
+           "revisión", "conexión", "función", "compañía", "pequeño",
+           "administración", "información", "días"],
+    "nb": ["forsinkelse", "smørbrød", "Ålesund", "større", "påvirker",
+           "løsning", "årsak", "gjennomføre", "første", "både", "økning",
+           "tilbakemelding", "håndtere", "avhengig", "møte", "bør",
+           "utførelse", "sjekkliste", "innstilling", "nødvendig"],
+    "pl": ["opóźnienie", "gęślą", "wąż", "źródło", "ćwiczenie", "wdrożenie",
+           "użytkownik", "błąd", "zmiana", "ustawienia", "wartość",
+           "połączenie", "część", "wyjście", "różnica", "sprawdzić",
+           "będzie", "można", "wcześniej", "zapisać"],
+    "ru": ["задержка", "кодировка", "проверка", "файл", "запись", "версия",
+           "настройка", "значение", "ошибка", "результат", "изменение",
+           "выполнение", "пользователь", "подключение", "уровень", "объём",
+           "строка", "возврат", "сообщение", "обновление"],
+    "zh": ["编码", "错误", "文件", "测试", "数据", "版本", "配置", "监控",
+           "回滚", "部署", "验证", "输出", "输入", "连接", "设置", "结果",
+           "变更", "记录", "检查", "恢复"],
+}
+
 # Three ways to ask. The bug is reported in ordinary use, so a clean result
 # under a strong "do not alter" instruction proves much less than a clean
 # result under the plain one — and the compose mode is closest of all to what
@@ -111,6 +157,33 @@ PROMPTS = {
         "\n"
         "{text}\n"
     ),
+    # #14131 is NOT about files. Its author says so explicitly in the thread:
+    # "This issue: ASCII substitution in chat responses on macOS ... different
+    # context (chat output vs file editing), likely different root cause."
+    # So this mode writes no file at all and checks the reply itself. The
+    # file-writing modes above match #13939 and #7335; this one matches #14131.
+    "chat": (
+        "Antworte auf Deutsch, oder in der Sprache der Woerter unten.\n"
+        "Erklaere kurz (etwa 200 Woerter), wie man eine Softwareversion plant\n"
+        "und ausliefert. Verwende dabei jedes der folgenden Woerter mindestens\n"
+        "einmal, genau so geschrieben wie hier, ohne die Form zu aendern:\n"
+        "\n"
+        "{text}\n"
+    ),
+    # Length is the variable. Everything else matches compose mode, so the two
+    # rates are comparable and the only thing that changed is how much text the
+    # model had to produce before it was done.
+    "long": (
+        "Write technical documentation into ./{out} about deploying and\n"
+        "operating a web service: setup, configuration, monitoring, rollback,\n"
+        "and troubleshooting. Write it in the same language as the words below.\n"
+        "At least 700 words, with headings and several paragraphs per section.\n"
+        "Every one of these words must appear in it at least once, exactly as\n"
+        "written here, in this exact form - do not inflect, decline, conjugate\n"
+        "or otherwise change them:\n"
+        "\n"
+        "{text}\n"
+    ),
 }
 
 # Every field of the invocation, recorded so a reader can repeat it exactly.
@@ -120,6 +193,10 @@ CLAUDE_ARGS = [
     "--permission-mode", "acceptEdits",
     "--allowedTools", "Write",
 ]
+
+
+# Chat mode needs no tools at all: the reply text is the thing under test.
+CHAT_ARGS = ["-p", "--output-format", "json"]
 
 
 # On Windows the launcher is claude.cmd, which subprocess will not find by the
@@ -141,17 +218,39 @@ def intended_for(lang: str, mode: str) -> str:
     """What the file must contain, whichever way we asked."""
     if mode == "compose":
         return " ".join(COMPOSE_WORDS[lang])
+    if mode in ("long", "chat"):
+        return " ".join(LONG_WORDS[lang])
     return SAMPLES[lang]
 
 
-def one_run(lang: str, mode: str, model: str, timeout: int) -> dict:
+# A Claude Code COLLABORATOR asked in #14131 on 2026-05-31:
+#   "This is expected to occur less frequently when the language is specified
+#    in Claude Code settings. I would like to know if folks have that specified
+#    and it still repro's, or if it resolves it."
+# Three months later the thread has two opinions and no measurements in reply.
+# --language answers exactly that question: same prompt, same model, same
+# everything, with the setting present or absent.
+LANGUAGE_NAMES = {"de": "German", "tr": "Turkish", "es": "Spanish",
+                  "fr": "French", "nb": "Norwegian", "pl": "Polish",
+                  "cs": "Czech", "ja": "Japanese", "ru": "Russian",
+                  "zh": "Chinese"}
+
+
+def one_run(lang: str, mode: str, model: str, timeout: int,
+            language_setting: bool = False) -> dict:
     """One isolated attempt. Returns a record; never raises."""
     workdir = tempfile.mkdtemp(prefix="mgrepro-")
-    rec = {"lang": lang, "mode": mode, "model_requested": model}
+    rec = {"lang": lang, "mode": mode, "model_requested": model,
+           "language_setting": language_setting}
     text = intended_for(lang, mode)
     try:
         prompt = PROMPTS[mode].format(out=OUT_NAME, text=text)
-        argv = [CLAUDE_BIN] + CLAUDE_ARGS
+        argv = [CLAUDE_BIN] + (CHAT_ARGS if mode == "chat" else CLAUDE_ARGS)
+        if language_setting:
+            sp = os.path.join(workdir, "mg-settings.json")
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump({"language": LANGUAGE_NAMES[lang]}, f)
+            argv += ["--settings", sp]
         if model:
             argv += ["--model", model]
         t0 = time.time()
@@ -175,6 +274,22 @@ def one_run(lang: str, mode: str, model: str, timeout: int) -> dict:
         rec["models_seen"] = sorted(usage)
         rec["cost_usd"] = meta.get("total_cost_usd")
         rec["session_id"] = meta.get("session_id")
+
+        if mode == "chat":
+            actual = meta.get("result") or ""
+            if not actual.strip():
+                rec["verdict"] = "NOFILE"
+                rec["codes"] = []
+                rec["stderr_tail"] = (proc.stderr or "")[-300:]
+                return rec
+            findings = [f for f in analyse(text, actual)
+                        if f.severity == SEV_BLOCK]
+            rec["codes"] = [f.code for f in findings]
+            rec["verdict"] = "CORRUPT" if findings else "OK"
+            if findings:
+                rec["detail"] = findings[0].detail[:400]
+                rec["actual"] = actual[:900]
+            return rec
 
         path = os.path.join(workdir, OUT_NAME)
         if not os.path.isfile(path):
@@ -206,7 +321,8 @@ def one_run(lang: str, mode: str, model: str, timeout: int) -> dict:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def run_matrix(langs, runs, model, timeout, mode="plain", verbose=True) -> dict:
+def run_matrix(langs, runs, model, timeout, mode="plain",
+               language_setting=False, verbose=True) -> dict:
     started = datetime.now(timezone.utc)
     version = claude_version()
     per_lang = OrderedDict()
@@ -215,7 +331,7 @@ def run_matrix(langs, runs, model, timeout, mode="plain", verbose=True) -> dict:
     for lang in langs:
         results = []
         for i in range(runs):
-            rec = one_run(lang, mode, model, timeout)
+            rec = one_run(lang, mode, model, timeout, language_setting)
             results.append(rec)
             all_records.append(rec)
             if verbose:
@@ -255,6 +371,7 @@ def run_matrix(langs, runs, model, timeout, mode="plain", verbose=True) -> dict:
         "python": platform.python_version(),
         "runs_per_lang": runs,
         "mode": mode,
+        "language_setting": language_setting,
         "prompt": PROMPTS[mode].format(out=OUT_NAME, text="<SAMPLE>"),
         "claude_args": CLAUDE_ARGS,
         "languages": per_lang,
@@ -308,7 +425,8 @@ def render_matrix() -> str:
         out.append("| %s | %s | %s | %s | %s | %d | %s |" % (
             r["utc"][:10], r["claude_code"],
             r.get("model_requested") or r["model_resolved"], r["os"],
-            r.get("mode", "strict"), r["runs_per_lang"], " | ".join(cells)))
+            r.get("mode", "strict") + ("+lang" if r.get("language_setting") else ""),
+            r["runs_per_lang"], " | ".join(cells)))
 
     out += ["", "## Findings seen", ""]
     seen = Counter()
@@ -339,10 +457,16 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=5, help="runs per language")
     ap.add_argument("--langs", nargs="+", default=list(SAMPLES),
                     choices=list(SAMPLES))
+    ap.add_argument("--timeout-long", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("--model", default="", help="passed to claude --model")
     ap.add_argument("--mode", default="plain", choices=list(PROMPTS),
                     help="strict = told not to alter; plain = no instruction; "
-                         "compose = the model writes the words itself")
+                         "compose = the model writes the words itself; "
+                         "long = same, but 700+ words and 20 required words")
+    ap.add_argument("--language", action="store_true",
+                    help="set the Claude Code `language` setting for the run "
+                         "(answers the question asked in #14131)")
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--render", action="store_true",
                     help="only rebuild MATRIX.md from the ledger")
@@ -362,7 +486,8 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    row = run_matrix(args.langs, args.runs, args.model, args.timeout, args.mode)
+    row = run_matrix(args.langs, args.runs, args.model, args.timeout,
+                     args.mode, args.language)
     append_ledger(row)
     render_matrix()
     print()

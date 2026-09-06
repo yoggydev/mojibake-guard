@@ -203,19 +203,50 @@ measures a **rate** instead:
 3. compare the file to that string, codepoint by codepoint
 
 ```bash
-python3 repro.py --runs 5 --mode plain      # "put this text in a file"
-python3 repro.py --runs 5 --mode compose    # the model writes the words itself
+python3 repro.py --mode plain   --runs 5    # "put this text in a file"
+python3 repro.py --mode compose --runs 5    # the model writes the words itself
+python3 repro.py --mode long    --runs 3    # 700+ words, 20 required words
+python3 repro.py --mode chat    --runs 5    # no file at all: the reply text
+python3 repro.py --mode chat    --runs 5 --language   # same, `language` set
 python3 repro.py --render                   # rebuild the table
 ```
+
+The modes are not interchangeable, and picking the wrong one is how this
+harness spent its first hundred runs testing the wrong thing. The author of
+[#14131](https://github.com/anthropics/claude-code/issues/14131) says in the
+thread that his issue is *"ASCII substitution in chat responses ... different
+context (chat output vs file editing), likely different root cause"*. So:
+
+| mode | what is checked | matches |
+|---|---|---|
+| `plain` `compose` `long` | the file the Write tool produced | #13939, #7335 |
+| `chat` | the reply text, no file involved | #14131 |
+
+`--language` sets Claude Code's `language` setting for the run. A Claude Code
+collaborator asked in #14131 on 2026-05-31 whether specifying it changes the
+rate; three months later the thread has two opinions and no measurements in
+reply. This flag is that A/B: same prompt, same model, setting present or absent.
 
 Results append to `results/matrix.jsonl` and render to `results/MATRIX.md`,
 one row per (date, version, model, OS, mode). Rows are never edited.
 
-**Current state: 89 runs, 0 reproductions** — Claude Code 2.1.263 on Linux with
-haiku-4.5 and sonnet, and 2.1.239 on Windows 11 with opus. That is a negative
-result, not a clean bill of health: the reports that started this name v2.0.70
-and macOS, and neither is covered here. If you run it somewhere the bug does
-happen, the table is the thing worth sharing.
+**Current state: 130 runs, 0 reproductions.**
+
+| what was checked | model | Claude Code | OS | runs | lost |
+|---|---|---|---:|---:|---:|
+| reply text | opus | 2.1.263 | Linux | 16 | 0 |
+| reply text, `language` set | opus | 2.1.263 | Linux | 16 | 0 |
+| Write, 700+ word document | opus | 2.1.263 | Linux | 9 | 0 |
+| Write, short text | sonnet | 2.1.263 | Linux | 30 | 0 |
+| Write, short text | haiku | 2.1.263 | Linux | 50 | 0 |
+| Write, short text | opus | 2.1.239 | Windows 11 | 9 | 0 |
+
+That is a negative result, not a clean bill of health. There is no macOS row,
+which is the platform label on #14131 and the platform in every report there.
+The original report is v2.0.70 and these runs are 2.1.239 / 2.1.263. And
+headless `-p` is not an interactive session. Any of the three could be why
+nothing shows up here, and none of them is evidence the bug is gone. If you can
+reproduce it, your row is the one worth having.
 
 Two bugs in the harness were found and fixed before it was published, both of
 which would have produced fake positives:
