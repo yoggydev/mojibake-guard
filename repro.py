@@ -157,16 +157,23 @@ PROMPTS = {
         "\n"
         "{text}\n"
     ),
+    # The first version of this prompt was written in German, so a Chinese run
+    # got a German reply with the required words translated (bian-ma -> "Code")
+    # and the check read 40 "lost" characters that were never corrupted. Found
+    # by running the published clone before posting the command anywhere.
+    #
     # #14131 is NOT about files. Its author says so explicitly in the thread:
     # "This issue: ASCII substitution in chat responses on macOS ... different
     # context (chat output vs file editing), likely different root cause."
     # So this mode writes no file at all and checks the reply itself. The
     # file-writing modes above match #13939 and #7335; this one matches #14131.
     "chat": (
-        "Antworte auf Deutsch, oder in der Sprache der Woerter unten.\n"
-        "Erklaere kurz (etwa 200 Woerter), wie man eine Softwareversion plant\n"
-        "und ausliefert. Verwende dabei jedes der folgenden Woerter mindestens\n"
-        "einmal, genau so geschrieben wie hier, ohne die Form zu aendern:\n"
+        "Reply in the same language as the words listed below. Do not reply in\n"
+        "English or in any other language.\n"
+        "Explain briefly, in about 200 words, how to plan and ship a software\n"
+        "release. Every one of the words below must appear in your reply at\n"
+        "least once, exactly as written here, in this exact form - do not\n"
+        "translate them, and do not inflect, decline or conjugate them:\n"
         "\n"
         "{text}\n"
     ),
