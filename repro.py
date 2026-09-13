@@ -15,10 +15,17 @@ What one run does
 Any character that was in the prompt and is not in the file is corruption.
 No dictionary, no language knowledge, no judgement call.
 
+Modes differ in HOW the text is asked for, because that turns out to matter
+more than the platform. `session` is the only one that is not a single
+isolated request: it makes several small Edit-tool changes inside one live
+session and checks each turn on its own, which is the shape the author of
+#14131 says he actually hits the bug in.
+
 Usage
   python3 repro.py --runs 5                       # all languages
   python3 repro.py --runs 10 --langs de tr fr
   python3 repro.py --runs 5 --model opus
+  python3 repro.py --runs 3 --langs de --mode session --turns 6
   python3 repro.py --render                       # rebuild MATRIX.md only
 
 Results append to results/matrix.jsonl and render to results/MATRIX.md.
@@ -177,6 +184,39 @@ PROMPTS = {
         "\n"
         "{text}\n"
     ),
+    # Every mode above is ONE isolated request. The author of #14131 ran this
+    # harness on macOS on 2026-09-13 (2.1.270, Opus 5) and got 0/5 on chat,
+    # 0/5 on chat+language and 0/5 on long -- then said why:
+    #
+    #   "In my real daily use, this doesn't need a long conversation or
+    #    compaction to show up - I regularly see it after just 3-5 turns.
+    #    And I see it primarily in file writes (the code/diff preview shown
+    #    inline in the CLI), not in the chat reply text itself. This harness's
+    #    chat mode checks the reply text, and its file-writing modes are still
+    #    a single isolated request - neither matches what I actually hit:
+    #    many small turns building up file edits in one working session."
+    #
+    # So the axis this mode adds is TURN DEPTH inside one session, with small
+    # Edit-tool changes to a file that is already on disk. Not output length,
+    # not platform. Each turn is checked on its own, so the result is a rate
+    # per turn index and not just a rate per run.
+    "session": (
+        "Edit ./{out}. Replace the line\n"
+        "\n"
+        "- {marker}: TODO\n"
+        "\n"
+        "with a line that starts with \"- {marker}: \" and then one short\n"
+        "sentence about scheduling a software release, written in the same\n"
+        "language as the words below. Every one of these words must appear in\n"
+        "that sentence at least once, exactly as written here, in this exact\n"
+        "form - do not translate them, and do not inflect, decline or\n"
+        "conjugate them:\n"
+        "\n"
+        "{text}\n"
+        "\n"
+        "Use the Edit tool. Change nothing else in the file.\n"
+        "When the edit is done, reply with just: DONE\n"
+    ),
     # Length is the variable. Everything else matches compose mode, so the two
     # rates are comparable and the only thing that changed is how much text the
     # model had to produce before it was done.
@@ -205,6 +245,19 @@ CLAUDE_ARGS = [
 # Chat mode needs no tools at all: the reply text is the thing under test.
 CHAT_ARGS = ["-p", "--output-format", "json"]
 
+# Session mode edits a file that already exists, so Read and Edit are the tools
+# under test. Write is deliberately NOT allowed: if the model cannot use Edit it
+# must fail visibly rather than quietly rewrite the whole file, which would be a
+# different code path and a different bug.
+SESSION_ARGS = [
+    "-p",
+    "--output-format", "json",
+    "--permission-mode", "acceptEdits",
+    "--allowedTools", "Read,Edit",
+]
+
+SESSION_FILE = "notes.md"
+
 
 # On Windows the launcher is claude.cmd, which subprocess will not find by the
 # bare name. Resolve it once, here, so every call uses a real path.
@@ -225,9 +278,193 @@ def intended_for(lang: str, mode: str) -> str:
     """What the file must contain, whichever way we asked."""
     if mode == "compose":
         return " ".join(COMPOSE_WORDS[lang])
-    if mode in ("long", "chat"):
+    if mode in ("long", "chat", "session"):
         return " ".join(LONG_WORDS[lang])
     return SAMPLES[lang]
+
+
+def ledger_prompt(mode: str) -> str:
+    """The prompt, with the sample blanked, as recorded in the ledger."""
+    if mode == "session":
+        return PROMPTS[mode].format(out=SESSION_FILE, marker="TURN-NN",
+                                    text="<SAMPLE>")
+    return PROMPTS[mode].format(out=OUT_NAME, text="<SAMPLE>")
+
+
+# ------------------------------------------------------------ session mode
+
+def session_seed(turns: int) -> str:
+    """The file the session starts from. Pure ASCII on purpose: nothing here
+    can be corrupted, so every non-ASCII character found later was produced by
+    the model during the session."""
+    lines = ["# Release notes", ""]
+    lines += ["- TURN-%02d: TODO" % k for k in range(1, turns + 1)]
+    return "\n".join(lines) + "\n"
+
+
+def turn_words(lang: str, turns: int, per_turn: int) -> list:
+    """Split the required words across turns. Cycles if there are not enough,
+    so --turns and --words-per-turn can be set independently."""
+    pool = LONG_WORDS[lang]
+    out, i = [], 0
+    for _ in range(turns):
+        out.append([pool[(i + j) % len(pool)] for j in range(per_turn)])
+        i += per_turn
+    return out
+
+
+def marker_line(text: str, marker: str):
+    """The line this turn was supposed to rewrite, or None."""
+    for line in text.splitlines():
+        if marker in line:
+            return line
+    return None
+
+
+def one_session_run(lang: str, model: str, timeout: int,
+                    language_setting: bool, turns: int, per_turn: int) -> dict:
+    """One session, `turns` small Edit turns, checked turn by turn.
+
+    Two things are measured that a single-request run cannot show:
+      - at which turn depth corruption first appears
+      - whether a later turn damages a line an earlier turn already wrote
+        (cross-turn damage: the per-turn checks all pass, the whole file does
+        not). That is collateral damage from re-editing, not generation.
+    """
+    workdir = tempfile.mkdtemp(prefix="mgsess-")
+    chunks = turn_words(lang, turns, per_turn)
+    rec = {"lang": lang, "mode": "session", "model_requested": model,
+           "language_setting": language_setting,
+           "turns_requested": turns, "words_per_turn": per_turn}
+    path = os.path.join(workdir, SESSION_FILE)
+    try:
+        seed = session_seed(turns)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(seed)
+        seed_lines = {l.split(":")[0].strip("- "): l
+                      for l in seed.splitlines() if l.startswith("- ")}
+
+        settings_path = None
+        if language_setting:
+            settings_path = os.path.join(workdir, "mg-settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({"language": LANGUAGE_NAMES[lang]}, f)
+
+        session_id = None
+        session_ids, turn_recs = [], []
+        out_tokens, cost, models_seen = Counter(), 0.0, set()
+        t0 = time.time()
+
+        for k in range(1, turns + 1):
+            marker = "TURN-%02d" % k
+            words = chunks[k - 1]
+            prompt = PROMPTS["session"].format(
+                out=SESSION_FILE, marker=marker, text=" ".join(words))
+
+            argv = [CLAUDE_BIN] + SESSION_ARGS
+            # Chain the NEWEST id, not the first: some versions mint a fresh id
+            # on --resume. Resuming the original every turn would branch from
+            # turn 1 each time and the depth being measured would never build.
+            if session_id:
+                argv += ["--resume", session_id]
+            if settings_path:
+                argv += ["--settings", settings_path]
+            if model:
+                argv += ["--model", model]
+
+            tr = {"turn": k, "words": words}
+            try:
+                proc = subprocess.run(argv, input=prompt, capture_output=True,
+                                      encoding="utf-8", errors="replace",
+                                      cwd=workdir, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                tr.update(verdict="TIMEOUT", codes=[])
+                turn_recs.append(tr)
+                break
+
+            meta = {}
+            try:
+                meta = json.loads(proc.stdout or "{}")
+            except ValueError:
+                pass
+            new_id = meta.get("session_id")
+            if new_id:
+                session_id = new_id
+                session_ids.append(new_id)
+            for m, u in (meta.get("modelUsage") or {}).items():
+                models_seen.add(m)
+                out_tokens[m] += u.get("outputTokens", 0)
+            cost += meta.get("total_cost_usd") or 0.0
+
+            with open(path, "rb") as f:
+                now = f.read().decode("utf-8", errors="replace")
+            line = marker_line(now, marker)
+            # A turn that never landed is NOT corruption. Without this the
+            # missing words would read as dropped characters and every failed
+            # Edit would be counted as a reproduction.
+            if line is None or line == seed_lines.get(marker):
+                tr.update(verdict="SKIPPED", codes=[],
+                          stderr_tail=(proc.stderr or "")[-200:])
+                turn_recs.append(tr)
+                continue
+
+            findings = [f for f in analyse(" ".join(words), line)
+                        if f.severity == SEV_BLOCK]
+            tr.update(verdict="CORRUPT" if findings else "OK",
+                      codes=[f.code for f in findings])
+            if findings:
+                tr["detail"] = findings[0].detail[:300]
+                tr["line"] = line[:300]
+            turn_recs.append(tr)
+
+        rec["seconds"] = round(time.time() - t0, 1)
+        rec["turns"] = turn_recs
+        rec["session_ids"] = session_ids
+        rec["one_thread"] = len(set(session_ids)) <= 1
+        rec["cost_usd"] = round(cost, 4)
+        rec["models_seen"] = sorted(models_seen)
+        rec["model_resolved"] = (out_tokens.most_common(1)[0][0]
+                                 if out_tokens else "unknown")
+
+        landed = [t for t in turn_recs if t["verdict"] in ("OK", "CORRUPT")]
+        rec["turns_landed"] = len(landed)
+        codes = {c for t in turn_recs for c in t.get("codes", [])}
+
+        if not landed:
+            rec["verdict"] = "NOFILE"
+            rec["codes"] = []
+            return rec
+
+        # Cross-turn damage: each line passed on its own, but the file as a
+        # whole lost characters a landed turn had put there.
+        with open(path, "rb") as f:
+            whole = f.read().decode("utf-8", errors="replace")
+        landed_words = " ".join(w for t in landed for w in t["words"])
+        cross = [f for f in analyse(landed_words, whole)
+                 if f.severity == SEV_BLOCK]
+        corrupt_turns = [t["turn"] for t in landed if t["verdict"] == "CORRUPT"]
+        if cross and not corrupt_turns:
+            rec["cross_turn_damage"] = True
+            codes |= {"CROSS_TURN_" + f.code for f in cross}
+            rec["detail"] = cross[0].detail[:300]
+
+        rec["codes"] = sorted(codes)
+        rec["verdict"] = ("CORRUPT"
+                          if corrupt_turns or rec.get("cross_turn_damage")
+                          else "OK")
+        if corrupt_turns:
+            rec["first_corrupt_turn"] = corrupt_turns[0]
+            bad = next(t for t in landed if t["verdict"] == "CORRUPT")
+            rec["detail"] = bad.get("detail", "")
+            rec["actual"] = bad.get("line", "")
+        return rec
+    except Exception as exc:  # noqa: BLE001
+        rec["verdict"] = "ERROR"
+        rec["codes"] = []
+        rec["error"] = repr(exc)[:300]
+        return rec
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 # A Claude Code COLLABORATOR asked in #14131 on 2026-05-31:
@@ -244,8 +481,12 @@ LANGUAGE_NAMES = {"de": "German", "tr": "Turkish", "es": "Spanish",
 
 
 def one_run(lang: str, mode: str, model: str, timeout: int,
-            language_setting: bool = False) -> dict:
+            language_setting: bool = False, turns: int = 6,
+            per_turn: int = 3) -> dict:
     """One isolated attempt. Returns a record; never raises."""
+    if mode == "session":
+        return one_session_run(lang, model, timeout, language_setting,
+                               turns, per_turn)
     workdir = tempfile.mkdtemp(prefix="mgrepro-")
     rec = {"lang": lang, "mode": mode, "model_requested": model,
            "language_setting": language_setting}
@@ -329,7 +570,8 @@ def one_run(lang: str, mode: str, model: str, timeout: int,
 
 
 def run_matrix(langs, runs, model, timeout, mode="plain",
-               language_setting=False, verbose=True) -> dict:
+               language_setting=False, verbose=True, turns=6,
+               per_turn=3) -> dict:
     started = datetime.now(timezone.utc)
     version = claude_version()
     per_lang = OrderedDict()
@@ -338,7 +580,8 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
     for lang in langs:
         results = []
         for i in range(runs):
-            rec = one_run(lang, mode, model, timeout, language_setting)
+            rec = one_run(lang, mode, model, timeout, language_setting,
+                          turns, per_turn)
             results.append(rec)
             all_records.append(rec)
             if verbose:
@@ -358,18 +601,45 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
             "codes": dict(codes),
             "failures": [
                 {k: v for k, v in r.items()
-                 if k in ("verdict", "codes", "detail", "actual", "seconds")}
+                 if k in ("verdict", "codes", "detail", "actual", "seconds",
+                          "first_corrupt_turn", "cross_turn_damage")}
                 for r in results if r["verdict"] != "OK"
             ],
         }
+        if mode == "session":
+            # The point of this mode: corruption by turn index, not by run.
+            # attempts counts only turns that actually landed an edit, so a
+            # skipped turn never inflates or deflates the rate.
+            depth = OrderedDict()
+            for r in results:
+                for t in r.get("turns", []):
+                    if t["verdict"] not in ("OK", "CORRUPT"):
+                        continue
+                    d = depth.setdefault(t["turn"], {"attempts": 0, "corrupt": 0})
+                    d["attempts"] += 1
+                    d["corrupt"] += t["verdict"] == "CORRUPT"
+            per_lang[lang]["turn_depth"] = {str(k): v for k, v in
+                                            sorted(depth.items())}
+            per_lang[lang]["skipped_turns"] = sum(
+                1 for r in results for t in r.get("turns", [])
+                if t["verdict"] == "SKIPPED")
+            per_lang[lang]["cross_turn_damage"] = sum(
+                1 for r in results if r.get("cross_turn_damage"))
+            per_lang[lang]["threads_broken"] = sum(
+                1 for r in results if r.get("one_thread") is False)
         if verbose:
             print(" -> %d/%d corrupt" % (per_lang[lang]["corrupt"], runs))
+            if mode == "session":
+                td = per_lang[lang].get("turn_depth", {})
+                print("     by turn: " + " ".join(
+                    "t%s %d/%d" % (k, v["corrupt"], v["attempts"])
+                    for k, v in td.items()))
 
     resolved = Counter(r.get("model_resolved") for r in all_records
                        if r.get("model_resolved"))
     cost = sum(r.get("cost_usd") or 0 for r in all_records)
 
-    return {
+    row = {
         "utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "claude_code": version,
         "model_requested": model or "(default)",
@@ -379,11 +649,15 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
         "runs_per_lang": runs,
         "mode": mode,
         "language_setting": language_setting,
-        "prompt": PROMPTS[mode].format(out=OUT_NAME, text="<SAMPLE>"),
-        "claude_args": CLAUDE_ARGS,
+        "prompt": ledger_prompt(mode),
+        "claude_args": SESSION_ARGS if mode == "session" else CLAUDE_ARGS,
         "languages": per_lang,
         "total_cost_usd": round(cost, 4),
     }
+    if mode == "session":
+        row["turns"] = turns
+        row["words_per_turn"] = per_turn
+    return row
 
 
 def append_ledger(row: dict) -> None:
@@ -411,9 +685,12 @@ def render_matrix() -> str:
     out = [
         "# Corruption rate by Claude Code version and language",
         "",
-        "Each cell is `corrupted / runs`. One run = one headless Claude Code",
-        "session asked to write a fixed string verbatim into an empty directory,",
-        "then the file compared to that string codepoint by codepoint.",
+        "Each cell is `corrupted / runs`. For every mode but `session`, one run",
+        "is one headless Claude Code request in an empty directory, with what",
+        "came back compared to the intended text codepoint by codepoint.",
+        "A `sessionxN` row is different: one run is N small Edit turns inside",
+        "ONE session, each turn checked on its own, and the cell counts a run as",
+        "corrupt if any of its turns was.",
         "Append-only: a row is never edited after it is written.",
         "",
         "| date (UTC) | Claude Code | model | OS | mode | N | " + " | ".join(langs) + " |",
@@ -429,11 +706,15 @@ def render_matrix() -> str:
             bad = d["corrupt"] + d["nofile"] + d["timeout"] + d["error"]
             cells.append(("**%d/%d**" if d["corrupt"] else "%d/%d")
                          % (bad, d["runs"]))
+        mode_cell = r.get("mode", "strict")
+        if r.get("turns"):
+            mode_cell += "x%d" % r["turns"]
+        if r.get("language_setting"):
+            mode_cell += "+lang"
         out.append("| %s | %s | %s | %s | %s | %d | %s |" % (
             r["utc"][:10], r["claude_code"],
             r.get("model_requested") or r["model_resolved"], r["os"],
-            r.get("mode", "strict") + ("+lang" if r.get("language_setting") else ""),
-            r["runs_per_lang"], " | ".join(cells)))
+            mode_cell, r["runs_per_lang"], " | ".join(cells)))
 
     out += ["", "## Findings seen", ""]
     seen = Counter()
@@ -450,7 +731,36 @@ def render_matrix() -> str:
             "```bash",
             "python3 repro.py --runs 5 --mode plain",
             "python3 repro.py --runs 5 --mode compose",
+            "python3 repro.py --runs 3 --mode session --turns 6 --langs de",
             "```", ""]
+
+    # Turn depth only exists in session rows, and it is the whole reason that
+    # mode was added, so it does not belong squashed into a single cell.
+    sess = [r for r in rows if r.get("mode") == "session"]
+    if sess:
+        out += ["", "## Session mode: corruption by turn depth", "",
+                "`n/m` = corrupt / turns that actually landed an edit. A turn",
+                "that never landed is counted in neither.", "",
+                "| date | Claude Code | OS | lang | " +
+                " | ".join("t%d" % i for i in range(1, 1 + max(
+                    r.get("turns", 0) for r in sess))) +
+                " | skipped | cross-turn |",
+                "|---|---|---|---|" + "---|" * (max(
+                    r.get("turns", 0) for r in sess) + 2)]
+        width = max(r.get("turns", 0) for r in sess)
+        for r in sess:
+            for lang, d in r["languages"].items():
+                td = d.get("turn_depth", {})
+                cells = []
+                for i in range(1, width + 1):
+                    v = td.get(str(i))
+                    cells.append("–" if not v else
+                                 ("**%d/%d**" if v["corrupt"] else "%d/%d")
+                                 % (v["corrupt"], v["attempts"]))
+                out.append("| %s | %s | %s | %s | %s | %d | %d |" % (
+                    r["utc"][:10], r["claude_code"], r["os"], lang,
+                    " | ".join(cells), d.get("skipped_turns", 0),
+                    d.get("cross_turn_damage", 0)))
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     text = "\n".join(out) + "\n"
@@ -459,7 +769,32 @@ def render_matrix() -> str:
     return text
 
 
+def pin_stdout_utf8() -> None:
+    """Print UTF-8 whatever the console's code page is.
+
+    Found on a ja-JP Windows console, 2026-09-13, by running --render there for
+    the first time: the run had already written MATRIX.md correctly, then died
+    printing it, because `–` (U+2013) has no CP932 encoding.
+
+    The cosmetic half of that is the table. The half that mattered is 30 lines
+    below: the final result is printed with ensure_ascii=False, and `detail`
+    and `actual` only carry non-ASCII WHEN A RUN WAS CORRUPT. So on the one
+    console this project exists to serve, the harness would have crashed at
+    exactly the moment it finally caught something, and every clean run before
+    it would have looked fine. It was never hit because every Windows run so
+    far reported zero failures.
+
+    A tool that measures encoding loss must not be the thing that loses.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass  # redirected to something that cannot be reconfigured
+
+
 def main() -> int:
+    pin_stdout_utf8()
     ap = argparse.ArgumentParser(prog="repro.py")
     ap.add_argument("--runs", type=int, default=5, help="runs per language")
     ap.add_argument("--langs", nargs="+", default=list(SAMPLES),
@@ -470,7 +805,14 @@ def main() -> int:
     ap.add_argument("--mode", default="plain", choices=list(PROMPTS),
                     help="strict = told not to alter; plain = no instruction; "
                          "compose = the model writes the words itself; "
-                         "long = same, but 700+ words and 20 required words")
+                         "long = same, but 700+ words and 20 required words; "
+                         "session = many small Edit turns in ONE session, "
+                         "checked per turn")
+    ap.add_argument("--turns", type=int, default=6,
+                    help="session mode: Edit turns inside one session "
+                         "(the author of #14131 reports 3-5 is enough)")
+    ap.add_argument("--words-per-turn", type=int, default=3,
+                    help="session mode: required words per turn")
     ap.add_argument("--language", action="store_true",
                     help="set the Claude Code `language` setting for the run "
                          "(answers the question asked in #14131)")
@@ -493,8 +835,13 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
+    if args.mode == "session" and args.turns < 1:
+        print("--turns must be at least 1", file=sys.stderr)
+        return 2
+
     row = run_matrix(args.langs, args.runs, args.model, args.timeout,
-                     args.mode, args.language)
+                     args.mode, args.language, turns=args.turns,
+                     per_turn=args.words_per_turn)
     append_ledger(row)
     render_matrix()
     print()

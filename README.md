@@ -208,6 +208,7 @@ python3 repro.py --mode compose --runs 5    # the model writes the words itself
 python3 repro.py --mode long    --runs 3    # 700+ words, 20 required words
 python3 repro.py --mode chat    --runs 5    # no file at all: the reply text
 python3 repro.py --mode chat    --runs 5 --language   # same, `language` set
+python3 repro.py --mode session --runs 3 --turns 6    # many small Edits, ONE session
 python3 repro.py --render                   # rebuild the table
 ```
 
@@ -221,6 +222,54 @@ context (chat output vs file editing), likely different root cause"*. So:
 |---|---|---|
 | `plain` `compose` `long` | the file the Write tool produced | #13939, #7335 |
 | `chat` | the reply text, no file involved | #14131 |
+| `session` | several small Edits inside one live session, per turn | #14131 as its author describes it in practice |
+
+### `session` mode, and why it exists
+
+On 2026-09-13 the author of #14131 ran this harness on macOS — the platform
+row that was missing above — on Claude Code 2.1.270 with Opus 5. `chat`,
+`chat --language` and `long` all came back 0/5. He then explained why that is
+not the good news it looks like:
+
+> In my real daily use, this doesn't need a long conversation or compaction to
+> show up — I regularly see it after just 3-5 turns, sometimes almost
+> immediately. And I see it primarily in file writes (the code/diff preview
+> shown inline in the CLI), not in the chat reply text itself. This harness's
+> chat mode checks the reply text, and its file-writing modes are still a
+> single isolated request — neither matches what I actually hit: many small
+> turns building up file edits in one working session.
+
+Every mode above this one is a single isolated request. That is the variable
+`session` changes, and nothing else: the language, the required words and the
+codepoint check are the same.
+
+One run seeds a temp directory with a **pure-ASCII** file —
+
+```
+# Release notes
+
+- TURN-01: TODO
+- TURN-02: TODO
+...
+```
+
+— then makes `--turns` requests **in one session**, chaining `--resume`, each
+asking for a single small `Edit` to one line. `Write` is not in `--allowedTools`,
+so a model that cannot use `Edit` fails visibly instead of quietly rewriting the
+whole file down a different code path. Nothing non-ASCII is in the seed, so
+every non-ASCII character checked later was produced by the model during the
+session.
+
+Each turn is checked on its own, which buys two things a single request cannot
+measure:
+
+- **the turn depth at which corruption first appears** — reported per turn
+  index, so "clean at turn 1, broken at turn 4" is visible as such rather than
+  averaged into one rate
+- **cross-turn damage** — every line passes its own check, but the file as a
+  whole has lost characters an earlier turn already wrote correctly. That is
+  collateral damage from re-editing, not a generation failure, and it has a
+  separate `CROSS_TURN_*` code
 
 `--language` sets Claude Code's `language` setting for the run. A Claude Code
 collaborator asked in #14131 on 2026-05-31 whether specifying it changes the
@@ -241,12 +290,16 @@ one row per (date, version, model, OS, mode). Rows are never edited.
 | Write, short text | haiku | 2.1.263 | Linux | 50 | 0 |
 | Write, short text | opus | 2.1.239 | Windows 11 | 9 | 0 |
 
-That is a negative result, not a clean bill of health. There is no macOS row,
-which is the platform label on #14131 and the platform in every report there.
-The original report is v2.0.70 and these runs are 2.1.239 / 2.1.263. And
-headless `-p` is not an interactive session. Any of the three could be why
-nothing shows up here, and none of them is evidence the bug is gone. If you can
-reproduce it, your row is the one worth having.
+That is a negative result, not a clean bill of health. The original report is
+v2.0.70 and these runs are 2.1.239 / 2.1.263, headless `-p` is not an
+interactive session, and none of that is evidence the bug is gone.
+
+The missing macOS row was the obvious suspect, and it has since been ruled out.
+On 2026-09-13 the author of #14131 ran `chat`, `chat --language` and `long` on
+macOS with 2.1.270 and Opus 5 and got 0/5 on all three — reported in the thread,
+not in this ledger, so it is not a row in the table above. Platform was not the
+variable. What he said next is what `session` mode below is for: the shape of
+the request was wrong, in every mode, for the thing he actually hits.
 
 Two bugs in the harness were found and fixed before it was published, both of
 which would have produced fake positives:
@@ -259,6 +312,44 @@ which would have produced fake positives:
   encodes stdin with the locale codec. On a Japanese Windows console that is
   CP932, so the prompt would have been mangled before Claude Code ever saw it
   and every run would have "failed". Stdin and stdout are now pinned to UTF-8.
+
+- **The harness crashing on the encoding it measures.** Found on a ja-JP
+  Windows console on 2026-09-13, the first time `--render` was run there.
+  `render_matrix()` wrote `MATRIX.md` correctly — it opens the file as UTF-8 —
+  and then died printing the same text to the console, because `–` (U+2013)
+  has no CP932 encoding. The cosmetic half of that is a table. The half that
+  mattered is that the final result is printed with `ensure_ascii=False`, and
+  `detail` and `actual` carry non-ASCII **only when a run was corrupt**. On the
+  one console this project exists to serve, the harness would have crashed at
+  exactly the moment it first caught something, and every clean run before that
+  would have looked fine. It was never hit because every Windows run so far
+  reported zero failures. `stdout` and `stderr` are now pinned to UTF-8 at
+  startup, and `test_session_mode.py` pins the regression: a real CP932 stream
+  is shown to reject U+2013, and a `CORRUPT`-shaped record is shown to survive
+  once the stream is reconfigured.
+
+`session` mode adds a third failure class. This one was designed against rather
+than discovered afterwards, which is a weaker claim and worth saying plainly:
+
+- **A turn that never landed is not corruption.** If a turn answers without
+  calling `Edit`, or edits the wrong line, the required words are simply absent
+  from the file — and a codepoint comparison cannot tell "the model dropped the
+  umlaut" from "the model never wrote the word". Counting the second as a
+  reproduction would manufacture exactly the result the harness is looking for.
+  Each turn therefore writes an ASCII marker (`TURN-04`) that cannot itself be
+  corrupted; if the marker line is missing or still reads `TODO`, that turn is
+  `SKIPPED` and is excluded from both the numerator and the denominator.
+
+`test_session_mode.py` pins all of this with a scripted fake in place of
+`claude` — no API calls, no cost. It asserts that a clean session reads clean,
+that an ASCII substitution at turn 4 is caught *at turn 4*, that a skipped turn
+invents no corruption, that cross-turn damage is caught when every individual
+line passes, and that a session where nothing lands is `NOFILE` rather than a
+reproduction.
+
+```bash
+python3 test_session_mode.py
+```
 
 A checker that has never caught itself being wrong has not been checked.
 
