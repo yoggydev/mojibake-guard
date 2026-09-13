@@ -293,13 +293,72 @@ def ledger_prompt(mode: str) -> str:
 
 # ------------------------------------------------------------ session mode
 
-def session_seed(turns: int) -> str:
-    """The file the session starts from. Pure ASCII on purpose: nothing here
-    can be corrupted, so every non-ASCII character found later was produced by
-    the model during the session."""
+# Prose that is ALREADY in the file before the session starts. Written by this
+# harness, never by the model, so any character missing from it later was
+# destroyed by an edit rather than never generated.
+#
+# Why this exists: with the pure-ASCII seed, every turn rewrites a line that
+# holds no non-ASCII yet, and the only text under test is what the model just
+# produced. People who hit this bug are not editing blank lines - they are
+# editing files that already contain their language. A read-modify-write over
+# existing non-ASCII is a different code path from appending new text, and it
+# was untested until this seed existed.
+SEED_PROSE = {
+    "de": ["Die Verzögerung bei der Prüfung führt zu größeren Ausfällen.",
+           "Der Schlüssel liegt in der Qualität der Rückgabe.",
+           "Änderungen an der Ausführung brauchen eine Bestätigung."],
+    "tr": ["Gecikme, güvenlik açısından büyük sorunlara yol açıyor.",
+           "İstanbul'daki sunucu değişikliği doğrulama bekliyor.",
+           "Öğrenci kaydı için bağlantı ayarları güncellendi."],
+    "es": ["La configuración añade una señal de versión.",
+           "¿Cuántos años lleva esta aplicación en producción?",
+           "La información de conexión se revisó según el código."],
+    "fr": ["La requête déjà prête a réussi l'épreuve de sécurité.",
+           "L'élève a détaillé le problème précédent à Noël.",
+           "La génération des références demande une vérité vérifiée."],
+    "nb": ["Åse og Øyvind spiste smørbrød i Ålesund før møtet.",
+           "Løsningen påvirker både årsak og økning i utførelsen.",
+           "Første tilbakemelding bør håndteres nødvendig raskt."],
+    "pl": ["Zażółć gęślą jaźń, bo wdrożenie ma opóźnienie.",
+           "Użytkownik zgłosił błąd w części połączenia.",
+           "Wartość źródła można sprawdzić wcześniej i zapisać."],
+    "cs": ["Příliš žluťoučký kůň úpěl ďábelské ódy.",
+           "Uživatel hlásí chybu v nastavení přístupu.",
+           "Hodnota řetězce se změní až po návratu úrovně."],
+    "ja": ["文字化けが起きるとファイルが黙って壊れる。",
+           "設定を確認してから実行し、出力を計測する。",
+           "境界で符号が変わる箇所を再現し、台帳に記録する。"],
+    "ru": ["Проверка кодировки показала ошибку при записи.",
+           "Настройка значения выполняется после подключения.",
+           "Уровень объёма строки обновляется при возврате."],
+    "zh": ["这是一个中文测试文件，编码错误会导致数据丢失。",
+           "配置监控与回滚需要先验证输出和输入。",
+           "变更记录在检查后恢复到原来的设置。"],
+}
+
+
+def session_seed(turns: int, lang: str = "de", prose: bool = False) -> str:
+    """The file the session starts from.
+
+    prose=False: pure ASCII on purpose. Nothing in it can be corrupted, so
+    every non-ASCII character found later was produced by the model during the
+    session. This isolates generation.
+
+    prose=True: the file already contains the language. Now there are two
+    things that can go wrong, and they are different bugs: the model can fail
+    to produce a character, or an edit can destroy a character that was already
+    on disk. Only the second is a file-handling bug, and the pure-ASCII seed
+    could not see it at all.
+    """
     lines = ["# Release notes", ""]
+    if prose:
+        lines += SEED_PROSE[lang] + [""]
     lines += ["- TURN-%02d: TODO" % k for k in range(1, turns + 1)]
     return "\n".join(lines) + "\n"
+
+
+def seed_prose_text(lang: str, prose: bool) -> str:
+    return " ".join(SEED_PROSE[lang]) if prose else ""
 
 
 def turn_words(lang: str, turns: int, per_turn: int) -> list:
@@ -322,7 +381,8 @@ def marker_line(text: str, marker: str):
 
 
 def one_session_run(lang: str, model: str, timeout: int,
-                    language_setting: bool, turns: int, per_turn: int) -> dict:
+                    language_setting: bool, turns: int, per_turn: int,
+                    prose_seed: bool = False) -> dict:
     """One session, `turns` small Edit turns, checked turn by turn.
 
     Two things are measured that a single-request run cannot show:
@@ -335,10 +395,12 @@ def one_session_run(lang: str, model: str, timeout: int,
     chunks = turn_words(lang, turns, per_turn)
     rec = {"lang": lang, "mode": "session", "model_requested": model,
            "language_setting": language_setting,
-           "turns_requested": turns, "words_per_turn": per_turn}
+           "turns_requested": turns, "words_per_turn": per_turn,
+           "prose_seed": prose_seed}
     path = os.path.join(workdir, SESSION_FILE)
+    prose = seed_prose_text(lang, prose_seed)
     try:
-        seed = session_seed(turns)
+        seed = session_seed(turns, lang, prose_seed)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(seed)
         seed_lines = {l.split(":")[0].strip("- "): l
@@ -352,6 +414,7 @@ def one_session_run(lang: str, model: str, timeout: int,
 
         session_id = None
         session_ids, turn_recs = [], []
+        seed_damaged_at = None
         out_tokens, cost, models_seen = Counter(), 0.0, set()
         t0 = time.time()
 
@@ -398,6 +461,20 @@ def one_session_run(lang: str, model: str, timeout: int,
 
             with open(path, "rb") as f:
                 now = f.read().decode("utf-8", errors="replace")
+
+            # ★Checked on EVERY turn, landed or not. A turn that failed to edit
+            # ★its own line can still have rewritten the file and destroyed
+            # ★text that was already on disk. That is a file-handling bug, not
+            # ★a generation one, and the pure-ASCII seed cannot see it at all.
+            if prose:
+                seed_bad = [f for f in analyse(prose, now)
+                            if f.severity == SEV_BLOCK]
+                tr["seed_ok"] = not seed_bad
+                if seed_bad and seed_damaged_at is None:
+                    seed_damaged_at = k
+                    rec["seed_damage_codes"] = [f.code for f in seed_bad]
+                    rec["seed_damage_detail"] = seed_bad[0].detail[:300]
+
             line = marker_line(now, marker)
             # A turn that never landed is NOT corruption. Without this the
             # missing words would read as dropped characters and every failed
@@ -429,10 +506,15 @@ def one_session_run(lang: str, model: str, timeout: int,
         landed = [t for t in turn_recs if t["verdict"] in ("OK", "CORRUPT")]
         rec["turns_landed"] = len(landed)
         codes = {c for t in turn_recs for c in t.get("codes", [])}
+        rec["seed_damaged_at"] = seed_damaged_at
+        if seed_damaged_at is not None:
+            codes |= {"SEED_" + c for c in rec.get("seed_damage_codes", [])}
 
         if not landed:
-            rec["verdict"] = "NOFILE"
-            rec["codes"] = []
+            # ★A session where nothing landed is NOT a reproduction -- unless
+            # ★the pre-existing prose was destroyed anyway, which is worse.
+            rec["verdict"] = "CORRUPT" if seed_damaged_at else "NOFILE"
+            rec["codes"] = sorted(codes)
             return rec
 
         # Cross-turn damage: each line passed on its own, but the file as a
@@ -451,7 +533,7 @@ def one_session_run(lang: str, model: str, timeout: int,
         rec["codes"] = sorted(codes)
         rec["verdict"] = ("CORRUPT"
                           if corrupt_turns or rec.get("cross_turn_damage")
-                          else "OK")
+                          or seed_damaged_at else "OK")
         if corrupt_turns:
             rec["first_corrupt_turn"] = corrupt_turns[0]
             bad = next(t for t in landed if t["verdict"] == "CORRUPT")
@@ -482,11 +564,11 @@ LANGUAGE_NAMES = {"de": "German", "tr": "Turkish", "es": "Spanish",
 
 def one_run(lang: str, mode: str, model: str, timeout: int,
             language_setting: bool = False, turns: int = 6,
-            per_turn: int = 3) -> dict:
+            per_turn: int = 3, prose_seed: bool = False) -> dict:
     """One isolated attempt. Returns a record; never raises."""
     if mode == "session":
         return one_session_run(lang, model, timeout, language_setting,
-                               turns, per_turn)
+                               turns, per_turn, prose_seed)
     workdir = tempfile.mkdtemp(prefix="mgrepro-")
     rec = {"lang": lang, "mode": mode, "model_requested": model,
            "language_setting": language_setting}
@@ -571,7 +653,7 @@ def one_run(lang: str, mode: str, model: str, timeout: int,
 
 def run_matrix(langs, runs, model, timeout, mode="plain",
                language_setting=False, verbose=True, turns=6,
-               per_turn=3) -> dict:
+               per_turn=3, prose_seed=False) -> dict:
     started = datetime.now(timezone.utc)
     version = claude_version()
     per_lang = OrderedDict()
@@ -581,7 +663,7 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
         results = []
         for i in range(runs):
             rec = one_run(lang, mode, model, timeout, language_setting,
-                          turns, per_turn)
+                          turns, per_turn, prose_seed)
             results.append(rec)
             all_records.append(rec)
             if verbose:
@@ -627,6 +709,13 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
                 1 for r in results if r.get("cross_turn_damage"))
             per_lang[lang]["threads_broken"] = sum(
                 1 for r in results if r.get("one_thread") is False)
+            per_lang[lang]["prose_seed"] = prose_seed
+            if prose_seed:
+                dmg = [r.get("seed_damaged_at") for r in results]
+                per_lang[lang]["seed_damaged"] = sum(
+                    1 for d in dmg if d is not None)
+                per_lang[lang]["seed_damaged_at"] = [d for d in dmg
+                                                     if d is not None]
         if verbose:
             print(" -> %d/%d corrupt" % (per_lang[lang]["corrupt"], runs))
             if mode == "session":
@@ -657,6 +746,7 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
     if mode == "session":
         row["turns"] = turns
         row["words_per_turn"] = per_turn
+        row["prose_seed"] = prose_seed
     return row
 
 
@@ -709,6 +799,8 @@ def render_matrix() -> str:
         mode_cell = r.get("mode", "strict")
         if r.get("turns"):
             mode_cell += "x%d" % r["turns"]
+        if r.get("prose_seed"):
+            mode_cell += "+prose"
         if r.get("language_setting"):
             mode_cell += "+lang"
         out.append("| %s | %s | %s | %s | %s | %d | %s |" % (
@@ -738,16 +830,20 @@ def render_matrix() -> str:
     # mode was added, so it does not belong squashed into a single cell.
     sess = [r for r in rows if r.get("mode") == "session"]
     if sess:
+        width = max(r.get("turns", 0) for r in sess)
         out += ["", "## Session mode: corruption by turn depth", "",
                 "`n/m` = corrupt / turns that actually landed an edit. A turn",
                 "that never landed is counted in neither.", "",
-                "| date | Claude Code | OS | lang | " +
-                " | ".join("t%d" % i for i in range(1, 1 + max(
-                    r.get("turns", 0) for r in sess))) +
-                " | skipped | cross-turn |",
-                "|---|---|---|---|" + "---|" * (max(
-                    r.get("turns", 0) for r in sess) + 2)]
-        width = max(r.get("turns", 0) for r in sess)
+                "`seed` is what the file contained before the session started.",
+                "`ascii` means nothing on disk could be corrupted, so the",
+                "column measures generation only. `prose` means the file",
+                "already held the language, and `seed lost` counts runs where",
+                "an edit destroyed text that was there from the start — a",
+                "file-handling failure, which the `ascii` seed cannot see.", "",
+                "| date | Claude Code | OS | lang | seed | " +
+                " | ".join("t%d" % i for i in range(1, width + 1)) +
+                " | skipped | cross-turn | seed lost |",
+                "|---|---|---|---|---|" + "---|" * (width + 3)]
         for r in sess:
             for lang, d in r["languages"].items():
                 td = d.get("turn_depth", {})
@@ -757,10 +853,15 @@ def render_matrix() -> str:
                     cells.append("–" if not v else
                                  ("**%d/%d**" if v["corrupt"] else "%d/%d")
                                  % (v["corrupt"], v["attempts"]))
-                out.append("| %s | %s | %s | %s | %s | %d | %d |" % (
+                prose = d.get("prose_seed") or r.get("prose_seed")
+                lost = ("**%d**" % d["seed_damaged"]
+                        if d.get("seed_damaged") else
+                        ("%d" % d.get("seed_damaged", 0) if prose else "–"))
+                out.append("| %s | %s | %s | %s | %s | %s | %d | %d | %s |" % (
                     r["utc"][:10], r["claude_code"], r["os"], lang,
+                    "prose" if prose else "ascii",
                     " | ".join(cells), d.get("skipped_turns", 0),
-                    d.get("cross_turn_damage", 0)))
+                    d.get("cross_turn_damage", 0), lost))
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     text = "\n".join(out) + "\n"
@@ -813,6 +914,10 @@ def main() -> int:
                          "(the author of #14131 reports 3-5 is enough)")
     ap.add_argument("--words-per-turn", type=int, default=3,
                     help="session mode: required words per turn")
+    ap.add_argument("--prose-seed", action="store_true",
+                    help="session mode: start from a file that ALREADY "
+                         "contains the language, and check that the "
+                         "pre-existing text survives every edit")
     ap.add_argument("--language", action="store_true",
                     help="set the Claude Code `language` setting for the run "
                          "(answers the question asked in #14131)")
@@ -841,7 +946,8 @@ def main() -> int:
 
     row = run_matrix(args.langs, args.runs, args.model, args.timeout,
                      args.mode, args.language, turns=args.turns,
-                     per_turn=args.words_per_turn)
+                     per_turn=args.words_per_turn,
+                     prose_seed=args.prose_seed)
     append_ledger(row)
     render_matrix()
     print()

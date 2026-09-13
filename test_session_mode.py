@@ -98,6 +98,17 @@ class Fake:
         text = text.replace("- %s: TODO" % marker,
                             "- %s: %s" % (marker, sentence))
 
+        if self.scenario == "seed_damage" and turn == 4:
+            # The turn writes its OWN line correctly, but mangles the German
+            # prose that was already in the file before the session started.
+            # Per-turn checks all pass; only the seed check can see this.
+            out = []
+            for ln in text.splitlines():
+                if not ln.startswith("- TURN-") and not ln.startswith("#"):
+                    ln = strip_marks(ln)
+                out.append(ln)
+            text = "\n".join(out) + "\n"
+
         if self.scenario == "cross_turn" and turn == 5:
             # Collateral damage: re-editing the file mangles a line that an
             # earlier turn already wrote correctly.
@@ -124,11 +135,12 @@ class Fake:
             stdout=json.dumps(payload), stderr="")
 
 
-def run(scenario, turns=6, per_turn=3):
+def run(scenario, turns=6, per_turn=3, prose_seed=False):
     fake = Fake(scenario)
     subprocess.run = fake
     try:
-        rec = repro.one_session_run("de", "", 60, False, turns, per_turn)
+        rec = repro.one_session_run("de", "", 60, False, turns, per_turn,
+                                    prose_seed)
     finally:
         subprocess.run = REAL_RUN
     return rec, fake
@@ -181,6 +193,30 @@ def main() -> int:
     rec, _ = run("no_edits")
     check("verdict", rec["verdict"], "NOFILE")
     check("turns landed", rec["turns_landed"], 0)
+
+    # The pure-ASCII seed cannot see damage to text that was already on disk,
+    # because there is no non-ASCII on disk to damage. --prose-seed is the
+    # whole point of these two scenarios.
+    print("prose seed: clean session leaves the German prose intact")
+    rec, _ = run("clean", prose_seed=True)
+    check("verdict", rec["verdict"], "OK")
+    check("seed_damaged_at", rec.get("seed_damaged_at"), None)
+    check("every turn reports seed_ok",
+          all(t.get("seed_ok") for t in rec["turns"]), True)
+
+    print("prose seed: turn 4 mangles the pre-existing prose")
+    rec, _ = run("seed_damage", prose_seed=True)
+    check("verdict", rec["verdict"], "CORRUPT")
+    check("seed_damaged_at", rec.get("seed_damaged_at"), 4)
+    check("no per-turn corruption", rec.get("first_corrupt_turn"), None)
+    check("code is prefixed",
+          any(c.startswith("SEED_") for c in rec["codes"]), True)
+    check("turn 3 was still clean", rec["turns"][2].get("seed_ok"), True)
+
+    print("prose seed: the ASCII seed would have missed it")
+    rec, _ = run("seed_damage", prose_seed=False)
+    check("ascii seed sees nothing", rec["verdict"], "OK")
+    check("seed_damaged_at not set", rec.get("seed_damaged_at"), None)
 
     print("word splitting")
     chunks = repro.turn_words("de", 6, 3)
