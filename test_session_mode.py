@@ -146,6 +146,18 @@ def run(scenario, turns=6, per_turn=3, prose_seed=False):
     return rec, fake
 
 
+def run_default(scenario, turns=6, per_turn=3):
+    """Call it the way a caller who passes nothing would. The point is to pin
+    the DEFAULT, so this must not pass prose_seed at all."""
+    fake = Fake(scenario)
+    subprocess.run = fake
+    try:
+        rec = repro.one_session_run("de", "", 60, False, turns, per_turn)
+    finally:
+        subprocess.run = REAL_RUN
+    return rec, fake
+
+
 FAILURES = []
 
 
@@ -218,6 +230,25 @@ def main() -> int:
     check("ascii seed sees nothing", rec["verdict"], "OK")
     check("seed_damaged_at not set", rec.get("seed_damaged_at"), None)
 
+    # The seed check was opt-in when it was written, which meant it never ran
+    # unless someone remembered a flag - a safety check silently inactive
+    # exactly when it matters. These pin the flip: prose is the default, and
+    # --ascii-seed is the explicit opt-out.
+    print("prose seed is the DEFAULT, not opt-in")
+    rec, _ = run_default("seed_damage")
+    check("damage caught with no flag passed", rec["verdict"], "CORRUPT")
+    check("seed_damaged_at", rec.get("seed_damaged_at"), 4)
+    check("session_seed() default has non-ASCII",
+          any(ord(c) > 127 for c in repro.session_seed(6)), True)
+    import inspect
+    for fn in (repro.one_session_run, repro.one_run, repro.run_matrix):
+        d = inspect.signature(fn).parameters["prose_seed"].default
+        check("%s prose_seed default" % fn.__name__, d, True)
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "repro.py"), encoding="utf-8").read()
+    check("CLI exposes --ascii-seed", "--ascii-seed" in src, True)
+    check("CLI no longer exposes --prose-seed", "--prose-seed" in src, False)
+
     print("word splitting")
     chunks = repro.turn_words("de", 6, 3)
     check("turn count", len(chunks), 6)
@@ -227,10 +258,16 @@ def main() -> int:
     check("cycles when asked for more than the pool",
           len(repro.turn_words("de", 10, 3)), 10)
 
-    print("seed file is pure ASCII")
-    seed = repro.session_seed(6)
-    check("no non-ASCII in seed", any(ord(c) > 127 for c in seed), False)
-    check("one line per turn", seed.count("TODO"), 6)
+    # Both seeds have a property worth pinning, and they are opposites.
+    print("the two seeds")
+    ascii_seed = repro.session_seed(6, "de", False)
+    prose_seed = repro.session_seed(6, "de", True)
+    check("--ascii-seed really is pure ASCII",
+          any(ord(c) > 127 for c in ascii_seed), False)
+    check("default seed really does hold the language",
+          any(ord(c) > 127 for c in prose_seed), True)
+    check("one line per turn (ascii)", ascii_seed.count("TODO"), 6)
+    check("one line per turn (prose)", prose_seed.count("TODO"), 6)
 
     print("ledger prompt renders")
     check("session prompt has no stray field",

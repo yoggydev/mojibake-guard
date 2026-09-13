@@ -26,6 +26,7 @@ Usage
   python3 repro.py --runs 10 --langs de tr fr
   python3 repro.py --runs 5 --model opus
   python3 repro.py --runs 3 --langs de --mode session --turns 6
+  python3 repro.py --runs 3 --langs de --mode natural         # no instruction
   python3 repro.py --render                       # rebuild MATRIX.md only
 
 Results append to results/matrix.jsonl and render to results/MATRIX.md.
@@ -473,7 +474,7 @@ def natural_findings(lang: str, seed: str, added: str) -> list:
     return hits
 
 
-def session_seed(turns: int, lang: str = "de", prose: bool = False) -> str:
+def session_seed(turns: int, lang: str = "de", prose: bool = True) -> str:
     """The file the session starts from.
 
     prose=False: pure ASCII on purpose. Nothing in it can be corrupted, so
@@ -610,7 +611,7 @@ def one_natural_run(lang: str, model: str, timeout: int,
 
 def one_session_run(lang: str, model: str, timeout: int,
                     language_setting: bool, turns: int, per_turn: int,
-                    prose_seed: bool = False) -> dict:
+                    prose_seed: bool = True) -> dict:
     """One session, `turns` small Edit turns, checked turn by turn.
 
     Two things are measured that a single-request run cannot show:
@@ -792,7 +793,7 @@ LANGUAGE_NAMES = {"de": "German", "tr": "Turkish", "es": "Spanish",
 
 def one_run(lang: str, mode: str, model: str, timeout: int,
             language_setting: bool = False, turns: int = 6,
-            per_turn: int = 3, prose_seed: bool = False) -> dict:
+            per_turn: int = 3, prose_seed: bool = True) -> dict:
     """One isolated attempt. Returns a record; never raises."""
     if mode == "session":
         return one_session_run(lang, model, timeout, language_setting,
@@ -883,7 +884,7 @@ def one_run(lang: str, mode: str, model: str, timeout: int,
 
 def run_matrix(langs, runs, model, timeout, mode="plain",
                language_setting=False, verbose=True, turns=6,
-               per_turn=3, prose_seed=False) -> dict:
+               per_turn=3, prose_seed=True) -> dict:
     started = datetime.now(timezone.utc)
     version = claude_version()
     per_lang = OrderedDict()
@@ -1160,10 +1161,17 @@ def main() -> int:
                          "(the author of #14131 reports 3-5 is enough)")
     ap.add_argument("--words-per-turn", type=int, default=3,
                     help="session mode: required words per turn")
-    ap.add_argument("--prose-seed", action="store_true",
-                    help="session mode: start from a file that ALREADY "
-                         "contains the language, and check that the "
-                         "pre-existing text survives every edit")
+    # ★The prose seed is the DEFAULT, and that is deliberate. It was opt-in
+    # ★when it was added, which meant the check it enables never ran unless
+    # ★someone remembered a flag -- the same shape of trap as the CP932 crash
+    # ★below: a safety check that is silently inactive exactly when it is
+    # ★needed. --ascii-seed is the explicit opt-out, for isolating generation
+    # ★from file handling and for comparing against the earlier ascii rows.
+    ap.add_argument("--ascii-seed", action="store_true",
+                    help="session mode: start from a PURE-ASCII file instead "
+                         "of one that already contains the language. Isolates "
+                         "generation, but cannot detect damage to text that "
+                         "was already on disk")
     ap.add_argument("--language", action="store_true",
                     help="set the Claude Code `language` setting for the run "
                          "(answers the question asked in #14131)")
@@ -1193,7 +1201,7 @@ def main() -> int:
     row = run_matrix(args.langs, args.runs, args.model, args.timeout,
                      args.mode, args.language, turns=args.turns,
                      per_turn=args.words_per_turn,
-                     prose_seed=args.prose_seed)
+                     prose_seed=not args.ascii_seed)
     append_ledger(row)
     render_matrix()
     print()

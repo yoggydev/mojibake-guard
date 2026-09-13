@@ -226,6 +226,13 @@ context (chat output vs file editing), likely different root cause"*. So:
 | `session` | several small Edits inside one live session, per turn | #14131 as its author describes it in practice |
 | `natural` | a German document summarised with no instruction about characters at all | #14131, with the suppression removed |
 
+`session` starts from a file that **already contains the language**, and checks
+after every turn that the pre-existing text is still intact. `--ascii-seed`
+opts out of that and starts from a pure-ASCII file instead, which isolates
+generation but cannot see damage to text that was already on disk. The prose
+seed was opt-in when it was first added; that was a mistake, described at the
+end of this section.
+
 ### `natural` mode, and the instruction that may have been hiding the bug
 
 Every mode above hands the model a word list and says *"use these exactly as
@@ -371,6 +378,16 @@ than discovered afterwards, which is a weaker claim and worth saying plainly:
   Each turn therefore writes an ASCII marker (`TURN-04`) that cannot itself be
   corrupted; if the marker line is missing or still reads `TODO`, that turn is
   `SKIPPED` and is excluded from both the numerator and the denominator.
+
+There is a third entry, and it is about the two above rather than about Claude
+Code:
+
+- **A check that is off by default is a check that does not run.** The
+  pre-existing-text check shipped behind `--prose-seed`, opt-in. That is the
+  same shape as the CP932 crash: a safeguard that is silently inactive exactly
+  when it would matter, because nobody remembers a flag. The prose seed is now
+  the default and `--ascii-seed` is the explicit opt-out, and the test suite
+  pins the default rather than the flag.
 
 `test_session_mode.py` pins all of this with a scripted fake in place of
 `claude` — no API calls, no cost. It asserts that a clean session reads clean,
