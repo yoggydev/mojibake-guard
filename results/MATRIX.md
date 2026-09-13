@@ -20,6 +20,8 @@ Append-only: a row is never edited after it is written.
 | 2026-09-06 | 2.1.263 | opus | Linux 6.18.44-fc-v24 | chat+lang | 5 | 0/5 | 0/5 | – | 0/5 | – | – | – | – | – | – |
 | 2026-09-13 | 2.1.239 | opus | Windows 11 | sessionx6 | 3 | 0/3 | – | – | – | – | – | – | – | – | – |
 | 2026-09-13 | 2.1.270 | opus | Linux 6.18.44-fc-v24 | sessionx6+prose | 3 | 0/3 | – | – | – | – | – | – | – | – | – |
+| 2026-09-13 | 2.1.270 | opus | Linux 6.18.44-fc-v24 | sessionx6 | 3 | 0/3 | – | – | – | – | – | – | – | – | – |
+| 2026-09-13 | 2.1.270 | opus | Linux 6.18.44-fc-v24 | natural | 3 | 0/3 | – | – | – | – | – | – | – | – | – |
 
 ## Findings seen
 
@@ -50,3 +52,4 @@ file-handling failure, which the `ascii` seed cannot see.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-09-13 | 2.1.239 | Windows 11 | de | ascii | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0 | 0 | – |
 | 2026-09-13 | 2.1.270 | Linux 6.18.44-fc-v24 | de | prose | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0 | 0 | 0 |
+| 2026-09-13 | 2.1.270 | Linux 6.18.44-fc-v24 | de | ascii | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0 | 0 | – |

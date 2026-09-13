@@ -209,6 +209,7 @@ python3 repro.py --mode long    --runs 3    # 700+ words, 20 required words
 python3 repro.py --mode chat    --runs 5    # no file at all: the reply text
 python3 repro.py --mode chat    --runs 5 --language   # same, `language` set
 python3 repro.py --mode session --runs 3 --turns 6    # many small Edits, ONE session
+python3 repro.py --mode natural --runs 3 --langs de   # NO instruction about characters
 python3 repro.py --render                   # rebuild the table
 ```
 
@@ -223,6 +224,37 @@ context (chat output vs file editing), likely different root cause"*. So:
 | `plain` `compose` `long` | the file the Write tool produced | #13939, #7335 |
 | `chat` | the reply text, no file involved | #14131 |
 | `session` | several small Edits inside one live session, per turn | #14131 as its author describes it in practice |
+| `natural` | a German document summarised with no instruction about characters at all | #14131, with the suppression removed |
+
+### `natural` mode, and the instruction that may have been hiding the bug
+
+Every mode above hands the model a word list and says *"use these exactly as
+written, do not inflect, decline, conjugate or otherwise change them"*. That
+clause is in the false-positive list below: it exists because Czech declined a
+required word and the codepoint check read the grammar as corruption. It made
+the oracle sound.
+
+It is also, if #14131 is the model transliterating German of its own accord,
+the single most reliable way to *suppress the thing being measured*. A hundred
+clean runs taken under that instruction mean much less than they appear to.
+
+`natural` removes it. A German document is placed on disk, the model is asked
+to summarise it, and **nothing is said about characters**. The intended
+spelling is then known from the file rather than from the prompt.
+
+The price is that the check is no longer a codepoint comparison. It looks for a
+seed word's ASCII-folded form in the newly written text, which is a
+**heuristic**, and its false-positive class is obvious: a fold that is itself a
+real German word. `schön` folds to `schon` ("already"), `Größe` to `Grosse`
+(the ordinary Swiss spelling), `Ausfällen` to `Ausfallen`. Those forms are
+excluded per form rather than per word, so `für` is still watched through
+`fuer` while `fur` is ignored. **A hit from this mode is a `LEAD`, not a
+reproduction** — the verdict is named that way so it cannot be counted as one
+by accident. Read the sentence.
+
+A clean result is only meaningful if the model actually reused the vocabulary,
+so every run records how many of the watched words came back: the first runs
+reused 17 of 19 and kept every umlaut.
 
 ### `session` mode, and why it exists
 

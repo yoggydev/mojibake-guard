@@ -217,6 +217,15 @@ PROMPTS = {
         "Use the Edit tool. Change nothing else in the file.\n"
         "When the edit is done, reply with just: DONE\n"
     ),
+    # ★NO instruction about characters. That is the entire point: see the
+    # ★NATURAL_WATCH comment above. The document is already on disk, so the
+    # ★intended spelling is known without telling the model to preserve it.
+    "natural": (
+        "Read ./{out} and append a short section at the end of the file that\n"
+        "summarises the document and names its key terms.\n"
+        "Write in the same language as the document.\n"
+        "When the file is written, reply with just: DONE\n"
+    ),
     # Length is the variable. Everything else matches compose mode, so the two
     # rates are comparable and the only thing that changed is how much text the
     # model had to produce before it was done.
@@ -258,6 +267,14 @@ SESSION_ARGS = [
 
 SESSION_FILE = "notes.md"
 
+# natural mode appends to a file that already exists.
+NATURAL_ARGS = [
+    "-p",
+    "--output-format", "json",
+    "--permission-mode", "acceptEdits",
+    "--allowedTools", "Read,Edit,Write",
+]
+
 
 # On Windows the launcher is claude.cmd, which subprocess will not find by the
 # bare name. Resolve it once, here, so every call uses a real path.
@@ -278,6 +295,8 @@ def intended_for(lang: str, mode: str) -> str:
     """What the file must contain, whichever way we asked."""
     if mode == "compose":
         return " ".join(COMPOSE_WORDS[lang])
+    if mode == "natural":
+        return natural_doc(lang)
     if mode in ("long", "chat", "session"):
         return " ".join(LONG_WORDS[lang])
     return SAMPLES[lang]
@@ -288,6 +307,8 @@ def ledger_prompt(mode: str) -> str:
     if mode == "session":
         return PROMPTS[mode].format(out=SESSION_FILE, marker="TURN-NN",
                                     text="<SAMPLE>")
+    if mode == "natural":
+        return PROMPTS[mode].format(out=NATURAL_FILE)
     return PROMPTS[mode].format(out=OUT_NAME, text="<SAMPLE>")
 
 
@@ -337,6 +358,121 @@ SEED_PROSE = {
 }
 
 
+# ---------------------------------------------------------- natural mode
+#
+# Every other mode hands the model a word list and says "use these exactly as
+# written, do not inflect, decline, conjugate or otherwise change them".
+#
+# That clause is not decoration either: it exists because Czech declined the
+# required word and the codepoint check read the grammar as corruption. It
+# made the oracle sound.
+#
+# It may also have been suppressing the thing under test. If #14131 is the
+# model transliterating German of its own accord, then instructing it not to
+# change the words is the single most reliable way to stop it -- and a hundred
+# clean runs measured under that instruction say much less than they appear to.
+#
+# So this mode gives NO instruction about characters at all. It puts a German
+# document on disk and asks for a summary. The intended spelling is then known
+# from the FILE rather than from the prompt, and nothing tells the model to
+# preserve it.
+#
+# ★ The price is that the check is no longer a plain codepoint comparison. It
+# ★ looks for a seed word's ASCII-folded form in the new text, which is a
+# ★ HEURISTIC, unlike every other mode here. Its false-positive class is
+# ★ obvious: a fold that is itself a real German word. "schön" folds to
+# ★ "schon", which means "already"; "Größe" folds to "Grosse", which is the
+# ★ ordinary Swiss spelling; "Ausfällen" folds to "Ausfallen". Those forms are
+# ★ excluded below, per form and not per word, so "für" can still be watched
+# ★ through "fuer" while "fur" is ignored.
+# ★ A hit from this mode is a LEAD, not a reproduction. Read the sentence.
+
+NATURAL_DOC = {
+    "de": [
+        "# Betriebshandbuch",
+        "",
+        "## Auslieferung",
+        "",
+        "Die Verzögerung bei der Prüfung entsteht, weil die Bestätigung der",
+        "Änderung erst nach der Überprüfung durch die Behörde vorliegt. Der",
+        "Schlüssel zur Qualität liegt in der Ausführung der Rückgabe.",
+        "",
+        "## Betrieb",
+        "",
+        "Das Gebäude meldet die Erhöhung der Vergütung an die Übersicht.",
+        "Für das Zurücksetzen können die Werte aus dem Wörterbuch gelesen",
+        "werden. Die Prüfung schöner Ausgaben erfolgt getrennt.",
+    ],
+}
+
+# (word, folded form, code). Only forms whose fold is NOT itself a real word.
+NATURAL_WATCH = {
+    "de": [
+        ("Verzögerung", "Verzoegerung", "ASCII_SUBSTITUTION"),
+        ("Verzögerung", "Verzogerung", "SILENT_DROP"),
+        ("Prüfung", "Pruefung", "ASCII_SUBSTITUTION"),
+        ("Prüfung", "Prufung", "SILENT_DROP"),
+        ("Schlüssel", "Schluessel", "ASCII_SUBSTITUTION"),
+        ("Schlüssel", "Schlussel", "SILENT_DROP"),
+        ("Qualität", "Qualitaet", "ASCII_SUBSTITUTION"),
+        ("Qualität", "Qualitat", "SILENT_DROP"),
+        ("Rückgabe", "Rueckgabe", "ASCII_SUBSTITUTION"),
+        ("Rückgabe", "Ruckgabe", "SILENT_DROP"),
+        ("Bestätigung", "Bestaetigung", "ASCII_SUBSTITUTION"),
+        ("Bestätigung", "Bestatigung", "SILENT_DROP"),
+        ("Ausführung", "Ausfuehrung", "ASCII_SUBSTITUTION"),
+        ("Ausführung", "Ausfuhrung", "SILENT_DROP"),
+        ("Änderung", "Aenderung", "ASCII_SUBSTITUTION"),
+        ("Änderung", "Anderung", "SILENT_DROP"),
+        ("Überprüfung", "Ueberpruefung", "ASCII_SUBSTITUTION"),
+        ("Überprüfung", "Uberprufung", "SILENT_DROP"),
+        ("Vergütung", "Verguetung", "ASCII_SUBSTITUTION"),
+        ("Vergütung", "Vergutung", "SILENT_DROP"),
+        ("Behörde", "Behoerde", "ASCII_SUBSTITUTION"),
+        ("Behörde", "Behorde", "SILENT_DROP"),
+        ("Wörterbuch", "Woerterbuch", "ASCII_SUBSTITUTION"),
+        ("Wörterbuch", "Worterbuch", "SILENT_DROP"),
+        ("Gebäude", "Gebaeude", "ASCII_SUBSTITUTION"),
+        ("Gebäude", "Gebaude", "SILENT_DROP"),
+        ("Zurücksetzen", "Zuruecksetzen", "ASCII_SUBSTITUTION"),
+        ("Zurücksetzen", "Zurucksetzen", "SILENT_DROP"),
+        ("Übersicht", "Uebersicht", "ASCII_SUBSTITUTION"),
+        ("Übersicht", "Ubersicht", "SILENT_DROP"),
+        ("Erhöhung", "Erhoehung", "ASCII_SUBSTITUTION"),
+        ("Erhöhung", "Erhohung", "SILENT_DROP"),
+        # fold-only: the dropped form of each of these IS a German word
+        # ("fur", "konnen", "schon"), so only the ae/oe/ue expansion is watched.
+        ("für", "fuer", "ASCII_SUBSTITUTION"),
+        ("Für", "Fuer", "ASCII_SUBSTITUTION"),
+        ("können", "koennen", "ASCII_SUBSTITUTION"),
+        ("schöner", "schoener", "ASCII_SUBSTITUTION"),
+    ],
+}
+
+NATURAL_FILE = "handbuch.md"
+
+
+def natural_doc(lang: str) -> str:
+    return "\n".join(NATURAL_DOC[lang]) + "\n"
+
+
+def natural_findings(lang: str, seed: str, added: str) -> list:
+    """Folded forms of seed words that turned up in the newly written text.
+
+    A form is only counted if it is absent from the seed, so a document that
+    legitimately spells a word that way can never trigger it.
+    """
+    hits = []
+    for word, folded, code in NATURAL_WATCH[lang]:
+        if word not in seed or folded in seed:
+            continue
+        if folded in added:
+            i = added.find(folded)
+            hits.append({"word": word, "wrote": folded, "code": code,
+                         "context": added[max(0, i - 60):i + 60]})
+    return hits
+
+
 def session_seed(turns: int, lang: str = "de", prose: bool = False) -> str:
     """The file the session starts from.
 
@@ -378,6 +514,98 @@ def marker_line(text: str, marker: str):
         if marker in line:
             return line
     return None
+
+
+def one_natural_run(lang: str, model: str, timeout: int,
+                    language_setting: bool) -> dict:
+    """One request, no instruction about characters at all.
+
+    Verdicts differ from every other mode on purpose:
+      OK      nothing folded turned up
+      LEAD    a fold appeared -- READ THE SENTENCE before calling it anything
+      NOFILE  the model appended nothing to check
+    """
+    workdir = tempfile.mkdtemp(prefix="mgnat-")
+    rec = {"lang": lang, "mode": "natural", "model_requested": model,
+           "language_setting": language_setting}
+    path = os.path.join(workdir, NATURAL_FILE)
+    seed = natural_doc(lang)
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(seed)
+
+        argv = [CLAUDE_BIN] + NATURAL_ARGS
+        if language_setting:
+            sp = os.path.join(workdir, "mg-settings.json")
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump({"language": LANGUAGE_NAMES[lang]}, f)
+            argv += ["--settings", sp]
+        if model:
+            argv += ["--model", model]
+
+        t0 = time.time()
+        proc = subprocess.run(argv, input=PROMPTS["natural"].format(
+            out=NATURAL_FILE), capture_output=True, encoding="utf-8",
+            errors="replace", cwd=workdir, timeout=timeout)
+        rec["seconds"] = round(time.time() - t0, 1)
+
+        meta = {}
+        try:
+            meta = json.loads(proc.stdout or "{}")
+        except ValueError:
+            pass
+        usage = meta.get("modelUsage") or {}
+        rec["model_resolved"] = (
+            max(usage.items(), key=lambda kv: kv[1].get("outputTokens", 0))[0]
+            if usage else "unknown")
+        rec["cost_usd"] = meta.get("total_cost_usd")
+
+        with open(path, "rb") as f:
+            now = f.read().decode("utf-8", errors="replace")
+
+        # Only the text that was NOT there before is under test. Everything the
+        # model merely left alone is the seed's own spelling, not its choice.
+        added = now.replace(seed, "") if seed in now else now[len(seed):]
+        rec["added_chars"] = len(added.strip())
+        if len(added.strip()) < 40:
+            rec["verdict"] = "NOFILE"
+            rec["codes"] = []
+            rec["stderr_tail"] = (proc.stderr or "")[-200:]
+            return rec
+
+        # ★The seed itself must still be intact, or "what the model added" is
+        # ★not a meaningful slice and every count below is unreliable.
+        seed_bad = [f for f in analyse(seed, now) if f.severity == SEV_BLOCK]
+        rec["seed_intact"] = not seed_bad
+        if seed_bad:
+            rec["seed_damage_detail"] = seed_bad[0].detail[:300]
+
+        hits = natural_findings(lang, seed, added)
+        rec["hits"] = hits
+        rec["codes"] = sorted({h["code"] for h in hits})
+        # How many watched words the model actually reused. Without this a
+        # clean result is unreadable: it could mean "no folding" or "the
+        # summary happened not to use any of the words".
+        watched = {w for w, _, _ in NATURAL_WATCH[lang] if w in seed}
+        rec["watched_words"] = len(watched)
+        rec["reused_words"] = sorted(w for w in watched if w in added)
+        rec["verdict"] = "LEAD" if hits else "OK"
+        if hits:
+            rec["detail"] = "%s -> %s" % (hits[0]["word"], hits[0]["wrote"])
+            rec["actual"] = hits[0]["context"]
+        rec["added"] = added.strip()[:700]
+        return rec
+    except subprocess.TimeoutExpired:
+        rec["verdict"] = "TIMEOUT"
+        rec["codes"] = []
+        return rec
+    except Exception as exc:  # noqa: BLE001
+        rec["verdict"] = "ERROR"
+        rec["codes"] = []
+        rec["error"] = repr(exc)[:300]
+        return rec
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def one_session_run(lang: str, model: str, timeout: int,
@@ -569,6 +797,8 @@ def one_run(lang: str, mode: str, model: str, timeout: int,
     if mode == "session":
         return one_session_run(lang, model, timeout, language_setting,
                                turns, per_turn, prose_seed)
+    if mode == "natural":
+        return one_natural_run(lang, model, timeout, language_setting)
     workdir = tempfile.mkdtemp(prefix="mgrepro-")
     rec = {"lang": lang, "mode": mode, "model_requested": model,
            "language_setting": language_setting}
@@ -667,7 +897,7 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
             results.append(rec)
             all_records.append(rec)
             if verbose:
-                mark = {"OK": ".", "CORRUPT": "X", "NOFILE": "?",
+                mark = {"OK": ".", "CORRUPT": "X", "LEAD": "L", "NOFILE": "?",
                         "TIMEOUT": "T", "ERROR": "E"}.get(rec["verdict"], "?")
                 sys.stdout.write("%s%s " % (lang if i == 0 else "", mark))
                 sys.stdout.flush()
@@ -675,7 +905,11 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
         codes = Counter(c for r in results for c in r.get("codes", []))
         per_lang[lang] = {
             "runs": runs,
-            "corrupt": counts.get("CORRUPT", 0),
+            # natural mode never says CORRUPT: a folded form is a LEAD that a
+            # human still has to read. Counting it as corruption here would
+            # quietly promote a heuristic to a measurement.
+            "corrupt": counts.get("CORRUPT", 0) + counts.get("LEAD", 0),
+            "leads": counts.get("LEAD", 0),
             "ok": counts.get("OK", 0),
             "nofile": counts.get("NOFILE", 0),
             "timeout": counts.get("TIMEOUT", 0),
@@ -684,10 +918,22 @@ def run_matrix(langs, runs, model, timeout, mode="plain",
             "failures": [
                 {k: v for k, v in r.items()
                  if k in ("verdict", "codes", "detail", "actual", "seconds",
-                          "first_corrupt_turn", "cross_turn_damage")}
+                          "first_corrupt_turn", "cross_turn_damage",
+                          "hits", "added", "reused_words")}
                 for r in results if r["verdict"] != "OK"
             ],
         }
+        if mode == "natural":
+            per_lang[lang]["reused_words"] = sorted(
+                {w for r in results for w in r.get("reused_words", [])})
+            per_lang[lang]["watched_words"] = max(
+                [r.get("watched_words", 0) for r in results] or [0])
+            per_lang[lang]["seed_intact"] = all(
+                r.get("seed_intact", True) for r in results)
+            per_lang[lang]["hits"] = [h for r in results
+                                      for h in r.get("hits", [])]
+            per_lang[lang]["samples"] = [r.get("added", "")[:400]
+                                         for r in results][:3]
         if mode == "session":
             # The point of this mode: corruption by turn index, not by run.
             # attempts counts only turns that actually landed an edit, so a
